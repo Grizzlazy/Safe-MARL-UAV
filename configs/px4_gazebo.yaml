@@ -1,0 +1,150 @@
+# PX4/Gazebo track — reproduction config
+#
+# Target: Xiang et al., "Decentralized Consensus Inference-Based Hierarchical
+#         Reinforcement Learning for Multiconstrained UAV Pursuit-Evasion Game",
+#         IEEE TNNLS 36(10):18229-18243, 2025. DOI 10.1109/TNNLS.2025.3582909
+#
+# READ THIS FIRST: PX4/Gazebo is NOT the training environment in this paper.
+# Training happens in MPE (2-D particle sim); PX4/Gazebo SITL only VALIDATES the
+# trained policy. Do not try to train MARL inside Gazebo.
+#
+# PROVENANCE RULE: every value carries a source tag.
+#   [tnnls] = published TNNLS paper       (papers/px4_gazebo/PAPER.md)
+#   [ours]  = OUR CHOICE -> a DEVIATION, must be reported
+# Never silently change a [tnnls] value.
+
+experiment:
+  track: px4_gazebo
+  paper_doi: "10.1109/TNNLS.2025.3582909"
+  tier: T1                      # T1 = MAPPO on our CEFC reconstruction (MPE)
+  algorithm: mappo              # mappo | at_m (AT-M is T1 option b / T3)
+
+# ---------------------------------------------------------------------------
+# SCOPING WARNING, do not lose this.
+# The paper has NO standalone-MAPPO number. Its Table IV "MAPPO" row is
+# MAPPO + AT-M: MAPPO as the high-level policy on top of the authors' AT-M
+# low-level policy. So a plain-MAPPO result is NOT comparable to -397.29.
+# Decide explicitly which route to take, then record it here:
+#   (a) report our MAPPO as a NEW baseline on our reconstruction (qualitative
+#       comparison only), or
+#   (b) also implement AT-M-Step 3 to make the comparison direct (much more work).
+comparison_mode: a              # [ours] a | b  -- see papers/px4_gazebo/PAPER.md
+# ---------------------------------------------------------------------------
+
+env:
+  name: cefc                    # Cooperative Evasion and Formation Coverage
+  simulator: mpe                # mpe (train/eval) | sitl (validation only)
+  dim: 2                        # [tnnls] 2-D, fixed altitude
+
+  n_uavs: 8                     # [tnnls] Table I, N = 8
+  formation_patterns: [3, 4, 5, 6, 7, 8]        # [tnnls] set C
+  uav_init_range_m: [-2.0, 2.0]                 # [tnnls] x and y
+  uav_velocity_range: [-1.0, 1.0]               # [tnnls] m/s
+  adversary_velocity_range: [-0.75, 0.75]       # [tnnls] m/s
+  observation_distance_m: 3.0                   # [tnnls] delta_obs
+
+  n_target_areas: 2                             # [tnnls] |T| = 2
+  target_area_coords: [[-8, -8], [-8, 8], [8, -8], [8, 8]]   # [tnnls] sampled from
+  obstacle_density_per_m2: [0.0, 0.03]          # [tnnls] the two training settings
+  obstacle_density_dense_per_m2: 0.05           # [tnnls] harder eval setting
+
+  # [NOT VERIFIED] never stated in the paper. These are OURS -> deviations.
+  map_extent_m: [-12.0, 12.0]   # [ours] DEVIATION - map extent never stated
+  lidar_rays: 16                # [ours] DEVIATION - M never stated
+  obstacle_radius_m: 0.4        # [ours] 0.4 is stated for SITL only; reused here
+
+action:
+  low_level:
+    type: continuous
+    dim: 2                      # [tnnls] 2-D acceleration [u_x, u_y]
+  high_level:
+    type: discrete
+    dim: 9                      # [tnnls] anchor points on x/y from {-8,0,8} m
+    anchor_values_m: [-8, 0, 8]
+    regenerate_every_steps: 10  # [tnnls]
+
+reward:                         # [tnnls] Appendix A, Eq. (15)-(22) + Table VIII
+  weights:
+    low_level:  {formation: 15.0, navigation: 4.0,  collision: 100.0}   # Table I
+    high_level: {task: 10.0,      navigation: 0.1,  evasion: 100.0}     # Table I
+  params:                       # [tnnls] Table VIII
+    formation_lag_coeff: 0.3          # omega_l
+    decay_factor: 0.003               # omega_d
+    alert_distance_evasion_m: 2.0     # delta_a,e
+    alert_distance_collision_m: 0.5   # delta_a,c
+    formation_tolerance_m: 1.0        # delta_for
+    target_area_radius_m: 3.0         # delta_task
+    min_safety_distance_m: 0.2        # delta_s
+    collision_omega_cr1: 24.0
+    collision_omega_cr2: 8.0
+    collision_c1: 3.0
+    collision_c2: 1.0
+
+network:                        # [tnnls] Section V-A
+  low_level:       {type: mlp, layers: 3, hidden: 128}
+  global_estimator: {type: mlp, layers: 3}
+  distance_encoder: {type: linear, layers: 1}
+  other_mlp:       {layers: 2}
+  attention:       {heads: 4, dim: 64}
+  message_dim: 64
+
+train:                          # [tnnls] Table I and Section V-A
+  ppo:
+    gamma: 0.8                  # [tnnls] CONFIRMED from Table I - not a typo
+    clip_eps: 0.2
+    gae_lambda: 0.95
+    epochs: 15
+    optimizer: adam
+    lr: 1.0e-4
+  parallel_threads: 20
+  low_level:  {episodes: 500,  steps_per_episode: 100, anchor_init_m: [-5.0, 5.0]}
+  high_level: {pretrain_episodes: 1000, finetune_episodes: 500, steps_per_episode: 400}
+  at_m_alternative_steps: 3
+  consmac: {train_every_episodes: 20, updates: 5000, batch_size: 2048}
+  distillation: {hidden: 256, lr: 1.0e-4, episodes: 300000, batch_size: 600, replay_steps: 60000}
+  adversary: {algorithm: ppo, note: "same network as the low-level UAV policy"}
+  # [NOT VERIFIED] never stated:
+  entropy_coef: null            # [ours] TODO decide, then log as a deviation
+  value_loss_coef: null         # [ours] TODO
+  minibatch_size: null          # [ours] TODO
+  max_grad_norm: null           # [ours] TODO
+
+eval:
+  seeds: [0, 1, 2, 3, 4]        # [ours] paper reports NO seeds and NO error bars
+  n_episodes: 50                # [tnnls] the paper averages over 50 episodes
+  metrics_low_level:  [reward_per_step, formation_stability, navigation_efficiency, collision_probability]
+  metrics_high_level: [r_h, r_t, r_n, r_e, danger_time]
+  thresholds:                   # [tnnls] metric definitions
+    formation_error_m: 1.0      # F counts time with HD-based error < 1 m
+    navigation_proximity_m: 1.0 # N counts time within 1 m of destination
+    danger_distance_m: 2.0      # E counts time with adversary distance < 2 m
+  scale_sweep_n_uavs: [8, 9, 10, 12, 15]      # [tnnls] Table VI
+  adversary_strategies: [ppo, ddpg, r_largest, r_nearest]   # [tnnls] Table V
+
+# SITL validation only (T2). Their harness is CUSTOM and UNRELEASED -- explicitly
+# NOT XTDrone (the paper cites XTDrone as a contrast). This stack is OURS.
+sitl:
+  enabled: false                # turn on only at T2
+  # [NOT VERIFIED] the paper states none of these versions.
+  ubuntu: "22.04"               # [ours] forced: Gazebo Classic supports 22.04 only
+  gazebo: "classic"             # [tnnls] Gazebo-Classic; exact version unstated
+  px4_version: null             # [ours] TODO pin, e.g. v1.14.x
+  ros_version: null             # [ours] TODO pin (paper does not say ROS 1 vs 2)
+  n_uavs: 8
+  control_mode: offboard        # [tnnls] each UAV = independent Python process
+  interface: mavros             # [tnnls] ROS topics over UDP; PX4<->Gazebo over TCP
+  command_type: acceleration    # [tnnls] policy publishes acceleration setpoints
+  robustness:                   # [tnnls] Table VII perturbations
+    wind_speed_m_s: [0, 3, 5, 8]
+    sensing_deviation_m: [0.0, 0.3, 0.5, 0.8]
+
+# Paper's own numbers, for comparison only. NEVER overwrite with our results.
+# Source: TNNLS 2025 Table IV, N=8, averaged over 50 episodes, no error bars.
+paper_reference:
+  table4_n8:
+    mappo_plus_at_m:  {r_h: -397.29, r_t: 54.33,  r_n: -334.95, r_e: -116.68, e: 8.78}
+    hasac_plus_at_m:  {r_h: -381.07, r_t: 105.70, r_n: -347.82, r_e: -138.95, e: 11.42}
+    tarmac_plus_at_m: {r_h: -432.81, r_t: 29.81,  r_n: -367.06, r_e: -95.56,  e: 7.16}
+    masia_plus_at_m:  {r_h: -404.45, r_t: 31.89,  r_n: -336.17, r_e: -100.19, e: 7.72}
+    nvif_plus_at_m:   {r_h: -403.79, r_t: 16.12,  r_n: -340.58, r_e: -79.33,  e: 5.94}
+    ci_hrl:           {r_h: -281.56, r_t: 107.37, r_n: -327.27, r_e: -61.66,  e: 4.46}

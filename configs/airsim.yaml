@@ -1,0 +1,141 @@
+# AirSim track — reproduction config
+#
+# Target: Fan et al., "UAV Collision Avoidance in Unknown Scenarios with Causal
+#         Representation Disentanglement", Drones 9(1):10, 2025.
+#         DOI 10.3390/drones9010010
+# Base:   Huang et al., IROS 2022 (arXiv:2203.02650) — source of SAC+RAE and the
+#         network architecture the Drones paper omits.
+#
+# PROVENANCE RULE: every value carries a source tag.
+#   [drones]  = published Drones 2025 paper           (papers/airsim/PAPER.md)
+#   [iros22]  = Huang et al. IROS 2022 base paper
+#   [ours]    = OUR CHOICE, not in any paper -> a DEVIATION, must be reported
+# Never silently change a [drones] or [iros22] value. If you must, move it to
+# [ours] and record it in papers/airsim/PAPER.md under "Deviations We Expect".
+
+experiment:
+  track: airsim
+  paper_doi: "10.3390/drones9010010"
+  tier: T1                      # T1 = reproduce the SAC+RAE baseline
+  method: sac_rae               # sac_rae | sac_rae_crd
+
+env:
+  simulator: airsim
+  # [NOT VERIFIED] neither paper states AirSim/UE versions. Ours, pinned here.
+  airsim_version: null          # [ours] TODO fill in once installed
+  unreal_version: null          # [ours] TODO fill in once installed
+
+  n_uavs: 8                     # [drones] default; sweep below
+  action_dim: 3                 # [drones] [v_x, v_z, v_omega]
+
+  train_scene: playground       # [drones] no obstacles
+  train_volume_m: [14.0, 14.0, 5.0]   # [drones] start/goal sampled in this box
+  test_scene: forest            # [drones] unseen obstacles
+
+  # Test-time initialization: UAVs uniform on a circle, goals on the opposite side.
+  test_init: circle             # [drones]
+  test_circle_radius_m: 16.0    # [drones]  NOTE: iros22 used 12.0 — do not mix
+  n_obstacles: 4                # [drones] default for the main table
+
+  # [NOT VERIFIED] in either paper. Values below are OURS.
+  depth_image_hw: [80, 100]     # [ours] DEVIATION - resolution never stated
+  depth_image_stack: 3          # [iros22] three consecutive depth frames
+  episode_max_steps: 500        # [ours] DEVIATION - episode length never stated
+  arrival_radius_m: 0.5         # [drones] d_t < 0.5 counts as arrival
+
+reward:                         # [drones] Eq. (2)-(4), all constants published
+  r_arrival: 50.0
+  r_collision: -10.0
+  alpha_goal: 3.0
+  alpha_avoid: -0.05
+  d_safe: 5.0
+  # The paper writes r_g = alpha_goal * (d_t - d_{t-1}), which is NEGATIVE when
+  # closing on the goal. Suspected sign slip. Set true to use (d_{t-1} - d_t).
+  invert_goal_delta: true       # [ours] DEVIATION - see PAPER.md "Reward"
+
+# AirSim built-in PID; the policy only emits velocity commands. [drones] Table 1
+pid:
+  linear_velocity:  {kp: 0.2,  ki: 2.0, kd: 0.0}
+  angular_velocity: {kp: 0.25, ki: 0.0, kd: 0.0}
+
+uav:                            # [drones] Table 2
+  mass_kg: 0.8
+  rotor_count: 4
+  motor_output_range: [0.0, 1.0]
+  min_angling_throttle: 0.05
+  max_angular_rate_rad_s: 2.5
+  body_box_m: [0.2413, 0.1143, 0.0762]
+
+# SAC + RAE architecture. [iros22] - NOT in the Drones paper.
+network:
+  encoder:
+    conv_layers: 4
+    filters: 32
+    kernel_size: 3
+    stride_first: 2             # first conv
+    stride_rest: 1              # remaining convs
+    activation: relu
+    latent_dim: 50              # 50 for SAC+RAE. CRD splits 8+6+42=56 instead.
+    layer_norm: true
+  decoder:
+    fc_layers: 1
+    deconv_layers: 4            # mirrors the encoder
+  actor:  {hidden_layers: 3, hidden_units: 1024}
+  critic: {hidden_layers: 3, hidden_units: 1024}
+  actor_updates_encoder: false  # [iros22] actor grads must not reach the encoder
+
+# CRD latent split — only used when method: sac_rae_crd. [drones] Table 3
+crd:
+  n1: 8                         # task-irrelevant  -> DISCARDED
+  n2: 6                         # task-relevant, scenario-specific
+  n3: 42                        # task-relevant, scenario-invariant
+
+train:                          # [drones] Table 3 unless noted
+  batch_size: 128
+  max_episodes: 300             # [drones]; [iros22] used 200
+  update_times: 400
+  replay_capacity: 20000
+  gamma: 0.99
+  optimizer: adam
+  lr_encoder: 1.0e-4            # [drones]; [iros22] used 1.0e-3
+  lr_critic: 1.0e-4             # [drones]; [iros22] used 1.0e-3
+  lr_actor: 1.0e-4              # [drones]; [iros22] used 1.0e-3
+  critic_target_update_freq: 2
+  actor_update_freq: 2
+  tau_q: 0.01                   # critic Q-function soft-update rate
+  tau_enc: 0.05                 # critic encoder soft-update rate
+  actor_log_std_bounds: [-10.0, 2.0]
+  rae_lambda_z: 1.0e-6          # [iros22]
+  rae_lambda_phi: 1.0e-7        # [iros22]
+  # [NOT VERIFIED] never stated in either paper:
+  entropy_target: null          # [ours] TODO decide, then log as a deviation
+  replay_warmup_steps: null     # [ours] TODO
+
+eval:
+  # [NOT VERIFIED] the paper reports unlabelled point estimates with no seed
+  # protocol and no trial count. These are OURS and must be labelled as such.
+  seeds: [0, 1, 2, 3, 4]        # [ours] project default
+  n_episodes: 100               # [ours] DEVIATION - trial count never stated
+  metrics: [ssr, isr, spl, extra_distance, average_speed]   # [drones]
+
+  sweeps:                       # [drones] Table 6
+    n_uavs:     [8, 10, 12, 14]
+    n_obstacles: [4, 6, 8, 10]
+  scenes: [playground, forest, snowy_mountain, valley]      # [drones] Table 7
+
+# Paper's own numbers, for comparison only. NEVER overwrite with our results.
+# Source: Drones 2025 Table 4 (forest, circle init). Unlabelled point estimates.
+paper_reference:
+  table4_forest_circle_init:
+    sac_rae:            {ssr: 29.6, isr: 87.7, spl: 82.2, extra_distance: 10.591, average_speed: 0.457}
+    sac_rae_autoaugment: {ssr: 53.4, isr: 90.6, spl: 82.7, extra_distance: 3.192, average_speed: 0.854}
+    sac_rae_drac:       {ssr: 50.0, isr: 88.7, spl: 77.4, extra_distance: 4.712,  average_speed: 1.026}
+    sac_rae_l1:         {ssr: 69.6, isr: 92.9, spl: 84.2, extra_distance: 2.459,  average_speed: 0.870}
+    sac_rae_l2:         {ssr: 58.4, isr: 93.1, spl: 79.8, extra_distance: 4.410,  average_speed: 0.912}
+    sac_rae_crl:        {ssr: 71.1, isr: 94.5, spl: 85.1, extra_distance: 3.924,  average_speed: 0.844}
+    sac_rae_crd:        {ssr: 93.6, isr: 98.9, spl: 87.3, extra_distance: 3.728,  average_speed: 0.812}
+
+hardware_reported:              # [drones] what the authors used
+  os: "Ubuntu 20.04"
+  cpu: "Intel i9-13900K"
+  gpu: "NVIDIA RTX 4090"
